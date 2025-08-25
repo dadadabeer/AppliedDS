@@ -1,0 +1,726 @@
+---
+title: "Boozeless"
+author: "Mohammad Dabeer Ahmed (A0242380M)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+knitr:
+  opts_chunk:
+    warning: false
+    message: false
+    error: false
+---
+
+## 🔍 Introduction
+
+Boozeless is an emerging non-alcoholic spirits brand aiming to break into the upscale and experiential beverage scene in Singapore. In an increasingly saturated beverage market, success hinges not just on taste or packaging, but on **emotional alignment with consumer identity and venue ambiance**. 
+
+This project pioneers a novel approach to market entry by leveraging **natural language processing (NLP)**, **unsupervised learning**, and **emotion-based analytics** to match Boozeless with the most contextually and emotionally aligned F&B venues. Unlike traditional segmentation, which often relies solely on quantitative factors like ratings and reviews, our method taps into **the emotional undercurrents of customer feedback**, **venue-specific language**, and **experiential cues** that can be crucial to Boozeless’s brand narrative.
+
+We explore two parallel strategies:
+1. **General Fit** — Ranking venues based on rating, reviews, and sentiment.
+2. **Emotion-Based Fit** — Using custom emotion axes to score venues aligned with Boozeless’s brand DNA.
+
+The primary goal is to uncover high-potential target venues in segments:
+● Young, Mild and Free: modern venues connected with an active, healthy and sporty lifestyle
+● Aesthetically Anchored: venues with unique design, where people go for special occasions
+● Haute Cuisine: boundary pushing restaurants that aren't afraid to try new things in their menus.
+
+
+By decoding both statistical and linguistic signals, this analysis helps Boozeless not just find good venues, but the *right ones* — where customers are already primed for an elevated, health-conscious, and alcohol-free experience.
+
+This analysis integrates **natural language processing**, **unsupervised learning**, **emotion lexicons**, and **geospatial intelligence** to recommend optimal partnership targets for Boozeless.
+
+We begin by loading all necessary R packages for data manipulation, visualization, NLP, and sentiment analysis.
+
+```{r setup, include=FALSE}
+library(tableone)
+library(dplyr)
+library(tidyr)      
+library(ggplot2)
+library(tm)
+library(wordcloud)
+library(RColorBrewer)
+library(tidytext)
+library(stringr)
+library(cluster)
+library(leaflet)
+library(tibble)
+library(fmsb)
+library(knitr)
+```
+
+We load the dataset from CSV and remove irrelevant columns such as metadata fields (IDs, coordinates, URLs) that are not needed for our analysis.
+```{r}
+data <- read.csv("output.csv", stringsAsFactors = FALSE)
+
+columns_to_drop <- c(
+  "venue_id", "latitude", "longitude", "platform_listing_url",
+  "phone", "website", "venue_main_image", "venue_segment"
+)
+
+data_clean <- data[ , !(names(data) %in% columns_to_drop)]
+```
+
+Let’s inspect the column names after cleaning to understand the structure of our dataset.
+```{r}
+names(data_clean)
+```
+
+We use a word cloud to visualize the most frequently mentioned amenities across all venues, such as delivery, pet-friendly, or air-conditioning.
+
+```{r}
+amenities <- na.omit(data$venue_amenities)
+corpus <- Corpus(VectorSource(amenities))
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, stopwords("en"))
+
+tdm <- TermDocumentMatrix(corpus)
+m <- as.matrix(tdm)
+word_freqs <- sort(rowSums(m), decreasing = TRUE)
+df_words <- data.frame(word = names(word_freqs), freq = word_freqs)
+
+set.seed(123)
+wordcloud(words = df_words$word, freq = df_words$freq,
+          min.freq = 5, max.words = 100, random.order = FALSE,
+          colors = brewer.pal(8, "Dark2"))
+```
+### 💡 Insight: What Do Amenities Tell Us?
+
+### 💡 Insight: Functional vs Experiential Amenities
+
+The word cloud reveals that most amenities center around **functionality** — *“delivery,” “wifi,” “order”* — rather than **experience**, such as *“ambience,” “mixology,” or “tasting menu.” This indicates that while convenience dominates venue listings, it may not align with Boozeless’s **premium experiential identity**. 
+
+Hence, we pivot toward text-rich fields (like reviews and subsegments) to uncover venues where customers speak in the language of **atmosphere, discovery, and design**.
+
+
+We narrow down to venues that are highly rated, have many reviews, and belong to categories relevant to Boozeless such as bars and fine dining restaurants.
+```{r}
+filtered_data <- data %>%
+  filter(
+    average_rating >= 4.5,
+    review_count >= 100,
+    !is.na(review_sample),
+    !is.na(venue_amenities),
+    platform_category %in% c("Cocktail bar", "Fine dining restaurant", "Wine bar")
+  )
+```
+### 💡 Insight: Narrowing Down to High-End Spaces
+
+By filtering for 4.5+ average ratings, 100+ reviews, and Boozeless-relevant categories, we reduce noise and focus only on serious contenders in the premium market.
+
+
+We extract top keywords from customer reviews using TF-IDF to understand what makes each venue subsegment distinct.
+```{r}
+reviews <- filtered_data %>%
+  select(venue_subsegment, review_sample) %>%
+  na.omit()
+
+reviews_words <- reviews %>%
+  unnest_tokens(word, review_sample) %>%
+  anti_join(stop_words)
+
+tfidf <- reviews_words %>%
+  count(venue_subsegment, word, sort = TRUE) %>%
+  bind_tf_idf(word, venue_subsegment, n)
+
+tfidf %>%
+  group_by(venue_subsegment) %>%
+  slice_max(tf_idf, n = 5) %>%
+  ungroup() %>%
+  arrange(venue_subsegment, desc(tf_idf))
+```
+### 💡 Insight: Understanding the Lexicon of Experience
+
+TF-IDF helps decode how different venue types talk about experience.
+
+In Bars, terms like "drink" and "chill" suggest casual sociability.
+
+In Fine Dining, words like "wagyu" and "foie" hint at luxury and culinary storytelling.
+
+This matters because Boozeless needs to match its message to the venue's own voice. A venue talking about “craftsmanship” is more receptive to Boozeless’s “refined ritual” positioning than one emphasizing just “vibes.”
+
+
+We filter venues further by keywords aligned with Boozeless’s identity: health, experience, aesthetics, and modernity.
+```{r}
+
+target_keywords <- c("healthy", "fitness", "modern", "aesthetic", "design", "chef", "fine dining", "cocktail", "experiential")
+
+filtered_data <- data %>%
+  filter(
+    str_detect(tolower(venue_amenities), paste(target_keywords, collapse = "|")) |
+    str_detect(tolower(venue_subsegment), paste(target_keywords, collapse = "|"))
+  )
+
+```
+
+
+We visualize the most common platform categories after filtering to understand where Boozeless is most likely to fit.
+```{r}
+filtered_data %>%
+  count(platform_category, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(platform_category, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 10 Platform Categories", x = "Category", y = "Count")
+
+```
+### 💡 Insight: Boozeless’s Strategic Zones
+
+While general Bars dominate, Cocktail Bars and Fine Dining Restaurants appear prominently in the top 10 — validating our decision to focus on these segments. They represent **experience-forward zones** where Boozeless can build brand presence with storytelling and design integration.
+
+
+We repeat the above process for venue subsegments to assess Boozeless-relevant subtypes.
+```{r}
+filtered_data %>%
+  count(venue_subsegment, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(venue_subsegment, n), y = n)) +
+  geom_col(fill = "darkorange") +
+  coord_flip() +
+  labs(title = "Top 10 Venue Subsegments", x = "Subsegment", y = "Count")
+```
+
+### 💡 Insight: The Danger of Generality
+
+Subsegments like *“Bar”* and *“Restaurant”* dominate but are **too broad** to guide emotion-led marketing. This reinforces the need for **deeper language analysis** — to detect emotional cues that raw categories overlook.
+
+
+This faceted bar plot shows the top 5 unique words per subsegment, giving us deeper insight into language used by customer reviewers.
+```{r}
+tfidf_clean <- tfidf %>%
+  filter(!is.na(venue_subsegment), venue_subsegment != "", word != "")
+
+tfidf_clean %>%
+  group_by(venue_subsegment) %>%
+  slice_max(tf_idf, n = 5) %>%
+  ungroup() %>%
+  ggplot(aes(x = reorder_within(word, tf_idf, venue_subsegment), y = tf_idf, fill = venue_subsegment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~venue_subsegment, scales = "free") +
+  scale_x_reordered() +
+  coord_flip() +
+  labs(title = "Top 5 TF-IDF Words by Venue Subsegment")
+```
+### 💡 Insight: Lexical Diversity Maps to Experience Diversity
+
+This side-by-side TF-IDF chart reveals how *language mirrors lived experience*. 
+
+- In **Bars**, words like *“drink”*, *“chill”*, *“whisky”*, and *“coffee”* point to a **social, laid-back, and casual vibe** — ideal for messaging around spontaneity or refreshment.
+- In **Fine Dining**, words like *“wagyu”*, *“foie”*, and *“scallop”* reflect **luxury, exclusivity, and culinary craftsmanship** — spaces where Boozeless could position itself as a sophisticated pairing or curated addition.
+
+This lexical divergence validates that **a one-size-fits-all brand pitch would fall flat**. Instead, Boozeless should **adapt its language and visuals** based on venue type, using emotion-driven copy that resonates with each experience.
+
+
+We score sentiment for each venue based on its reviews, using the Bing lexicon. This helps identify venues with overwhelmingly positive or negative language.
+```{r}
+reviews <- filtered_data %>%
+  select(venue_name, review_sample) %>%
+  unnest_tokens(word, review_sample) %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(venue_name, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(sentiment_score = positive - negative)
+
+reviews %>%
+  arrange(desc(sentiment_score)) %>%
+  slice_head(n = 10)
+```
+
+### 💡 Insight: Sentiment as a Readiness Signal
+
+Top venues like *Cloudstreet*, *Nixta*, and *Chapter 1 Wine Bar* combine **volume, quality, and emotional warmth**. Positive tone suggests customers are **already in an uplifted state** — ideal conditions for Boozeless to enhance experiences, not compete for attention.
+
+Rather than chase generic high ratings, we’re seeking venues where **positive emotion is baked into the environment**.
+
+
+We look at the top few venues with their computed sentiment scores for a quick sanity check.
+```{r}
+head(reviews, 5)  
+```
+### 🧠 Why Clustering?
+
+High sentiment is promising — but not sufficient. Two venues may score well yet deliver **radically different experiences**. One may evoke elegance, the other social buzz.
+
+To uncover such hidden groupings, we use **unsupervised learning** — clustering venues by sentiment, rating, category, and more. This reveals **emotionally distinct market types** Boozeless can target with precision.
+
+
+## 🧩 Clustering: Merge Sentiment with Filtered Data
+
+We begin by joining the sentiment scores to our filtered venue data to prepare for clustering.
+
+```{r}
+cluster_data <- filtered_data %>%
+  inner_join(reviews %>% select(venue_name, sentiment_score), by = "venue_name")
+```
+
+We select relevant columns for clustering and compute Gower distance, which supports mixed (numeric and categorical) types.
+```{r}
+gower_data <- cluster_data %>%
+  select(average_rating, review_count, sentiment_score, platform_category, venue_subsegment, price_point_bucket) 
+
+gower_data <- gower_data %>%
+  mutate(across(where(is.character), as.factor))
+
+gower_dist <- daisy(gower_data, metric = "gower")
+```
+
+We apply PAM clustering with 10 clusters and assign labels to each venue.
+```{r}
+pam_fit <- pam(gower_dist, k = 10, diss = TRUE)
+cluster_data$cluster <- pam_fit$clustering
+```
+
+```{r}
+table(cluster_data$cluster)
+```
+
+We use PCA to reduce dimensions and visualize the clusters on a 2D scatter plot.
+```{r}
+numeric_data <- cluster_data %>%
+  select(average_rating, review_count, sentiment_score) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  na.omit() %>%
+  scale()
+
+
+# Run PCA manually
+pca_result <- prcomp(numeric_data, center = TRUE, scale. = TRUE)
+
+# Extract the first 2 principal components
+pca_df <- as.data.frame(pca_result$x[, 1:2])
+pca_df$cluster <- as.factor(pam_fit$clustering)
+pca_df$venue_name <- cluster_data$venue_name  # Optional: to label top venues
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 3) +
+  labs(title = "K-Medoids Clustering (PCA Projection)",
+       x = "Principal Component 1",
+       y = "Principal Component 2") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Paired")
+```
+
+## 📈 Interpreting the PCA Graph
+
+The PCA projection of the PAM clusters reveals insightful groupings in a reduced two-dimensional space. 
+
+- **Distinct clusters** emerge for upscale and niche segments such as "Luxury Fine Dining", "Trendy Cocktail Spots", and "Boutique Japanese" — suggesting a strong underlying difference in review language, sentiment, and customer experience.
+- Clusters that are closer together in PCA space may share experiential themes, even if they differ by platform category.
+- For example, "Premium Wine Bars" and "Upscale Restaurants" cluster in the same quadrant — indicating similar review language focused on anticipation and refined satisfaction.
+
+This visualization not only validates our segmentation strategy but also sharpens venue targeting by highlighting which clusters share emotional DNA with Boozeless’s brand identity
+
+> 📌 *Takeaway*: PCA helps visualize the diversity of customer experiences and guides us in selecting emotionally differentiated segments for Boozeless.
+
+
+We generate summaries for each cluster and manually assign descriptive labels based on characteristics.
+```{r}
+cluster_summary <- cluster_data %>%
+  group_by(cluster) %>%
+  summarise(
+    avg_rating = round(mean(average_rating, na.rm = TRUE), 2),
+    avg_sentiment = round(mean(sentiment_score, na.rm = TRUE), 2),
+    avg_reviews = round(mean(review_count, na.rm = TRUE), 1),
+    common_category = names(sort(table(platform_category), decreasing = TRUE))[1],
+    common_segment = names(sort(table(venue_subsegment), decreasing = TRUE))[1],
+    avg_price = names(sort(table(price_point_bucket), decreasing = TRUE))[1],
+    count = n()
+  )
+
+market_labels <- c(
+  "Luxury Fine Dining", "After-Work Bars", "Trendy Cocktail Spots", "Neutral Bars",
+  "Upscale Restaurants", "Premium Wine Bars", "Low-Buzz Bars",
+  "High-Traffic Chinese", "Boutique Japanese", "Popular Italian"
+)
+
+cluster_summary$market_type <- market_labels
+
+head(cluster_summary, 5)  
+
+```
+
+We assign each venue a custom score and rank the top 20 venues across clusters.
+
+📐 **Scoring Philosophy:**  
+Our composite score blends **average rating**, **review volume** (via a log scale), and **sentiment score** (weighted at 50%) to reward venues that are not only popular and high-quality — but also **emotionally impactful**. This scoring method **intentionally favors venues with authentic emotional pull over purely transactional popularity**, aligning with Boozeless’s emphasis on experience, storytelling, and identity.
+
+```{r}
+# Join cluster labels back to each venue
+cluster_data_labeled <- cluster_data %>%
+  left_join(cluster_summary %>% select(cluster, market_type), by = "cluster")
+
+# Add a composite score (weighted)
+top_venues <- cluster_data_labeled %>%
+  mutate(score = average_rating + 0.5 * sentiment_score + log1p(review_count)) %>%
+  arrange(desc(score)) %>%
+  slice_head(n = 20) %>%
+  select(venue_name, cluster, market_type, average_rating, sentiment_score, review_count, price_point_bucket, platform_category)
+
+head(top_venues, 5)  # prints first 5 rows
+```
+🧠 Insight:
+Sentiment scoring translates review tone into emotional affinity metrics.
+Top venues like Cloudstreet and Art di Daniele Sperindio don’t just have high scores — they attract language of joy, wonder, and “unforgettable moments.”
+
+Boozeless can ride this emotional halo by being present in spaces that guests already associate with delight and distinction.
+
+```{r}
+top_venues_geo <- top_venues %>%
+  left_join(filtered_data %>% select(venue_name, latitude, longitude), by = "venue_name")
+
+leaflet(data = top_venues_geo) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    ~longitude, ~latitude,
+    radius = 6,
+    color = "darkgreen",
+    stroke = TRUE,
+    fillOpacity = 0.85,
+    popup = ~paste0(
+      "<b>", venue_name, "</b><br>",
+      "Market Type: ", market_type, "<br>",
+      "Rating: ", average_rating, "<br>",
+      "Sentiment Score: ", sentiment_score
+    ),
+    label = ~venue_name
+  ) %>%
+  setView(lng = 103.85, lat = 1.30, zoom = 12)
+
+```
+
+
+We define a custom lexicon of emotion words that map to five emotional axes: pleasure–disgust, satisfaction–disappointment, excitement–frustration, curiosity–avoidance, and anticipation–dread.
+```{r}
+lexicon <- tribble(
+  ~word,              ~emotion,
+  # Pleasure – Disgust
+  "delicious",        "pleasure",
+  "tasty",            "pleasure",
+  "amazing",          "pleasure",
+  "wonderful",        "pleasure",
+  "enjoyable",        "pleasure",
+  "disgusting",       "disgust",
+  "awful",            "disgust",
+  "gross",            "disgust",
+  "rotten",           "disgust",
+  "bland",            "disgust",
+
+  # Satisfaction – Disappointment
+  "satisfied",        "satisfaction",
+  "perfect",          "satisfaction",
+  "impressed",        "satisfaction",
+  "worth",            "satisfaction",
+  "great",            "satisfaction",
+  "disappointed",     "disappointment",
+  "underwhelming",    "disappointment",
+  "meh",              "disappointment",
+  "average",          "disappointment",
+  "mediocre",         "disappointment",
+
+  # Excitement – Frustration
+  "exciting",         "excitement",
+  "fun",              "excitement",
+  "lively",           "excitement",
+  "buzzing",          "excitement",
+  "thrilling",        "excitement",
+  "slow",             "frustration",
+  "delay",            "frustration",
+  "frustrating",      "frustration",
+  "annoying",         "frustration",
+  "waited",           "frustration",
+
+  # Curiosity – Avoidance
+  "unique",           "curiosity",
+  "interesting",      "curiosity",
+  "creative",         "curiosity",
+  "quirky",           "curiosity",
+  "inventive",        "curiosity",
+  "boring",           "avoidance",
+  "repetitive",       "avoidance",
+  "avoid",            "avoidance",
+  "basic",            "avoidance",
+  "unoriginal",       "avoidance",
+
+  # Anticipation – Dread
+  "hopeful",          "anticipation",
+  "eager",            "anticipation",
+  "excited",          "anticipation",
+  "can't wait",       "anticipation",
+  "thrilled",         "anticipation",
+  "nervous",          "dread",
+  "anxious",          "dread",
+  "worried",          "dread",
+  "afraid",           "dread",
+  "hesitant",         "dread"
+)
+```
+
+We tokenize reviews and tag each word with its emotion type from our custom lexicon.
+```{r}
+tokenized_reviews <- filtered_data %>%
+  select(venue_name, review_sample) %>%
+  unnest_tokens(word, review_sample)
+```
+```{r}
+# Join tokenized reviews with emotion lexicon
+emotion_tagged <- tokenized_reviews %>%
+  inner_join(lexicon, by = "word")
+
+emotion_counts <- emotion_tagged %>%
+  count(venue_name, emotion) %>%
+  pivot_wider(names_from = emotion, values_from = n, values_fill = 0)
+
+head(emotion_counts, 5)  # prints first 10 rows
+
+```
+
+We compute numerical scores for each emotional axis by subtracting negative emotions from their positive counterparts.
+```{r}
+emotion_scores <- emotion_counts %>%
+  mutate(
+    pleasure_disgust = pleasure - disgust,
+    satisfaction_disappointment = satisfaction - disappointment,
+    excitement_frustration = excitement - frustration,
+    curiosity_avoidance = curiosity - avoidance,
+    anticipation_dread = anticipation - dread
+  )
+
+head(emotion_scores, 5) 
+
+```
+
+We enrich the original filtered dataset with computed emotion scores for each venue.
+```{r}
+filtered_data_enriched <- filtered_data %>%
+  left_join(emotion_scores, by = "venue_name")
+```
+
+
+## 📊 Emotion Profiles by Category (Radar Chart)
+
+We compare the emotional signatures of selected categories (e.g., Fine Dining, Bar, Cafe) across 5 emotion axes using a radar chart.
+
+```{r}
+emotion_by_category <- filtered_data_enriched %>%
+  group_by(platform_category) %>%
+  summarise(across(pleasure_disgust:anticipation_dread, mean, na.rm = TRUE))
+
+radar_data <- emotion_by_category %>%
+  filter(platform_category %in% c("Fine Dining", "Bar", "Cafe")) %>%
+  column_to_rownames("platform_category")
+
+radar_data <- rbind(apply(radar_data, 2, max), apply(radar_data, 2, min), radar_data)
+
+radarchart(radar_data, axistype = 1,
+           pcol = c("red", "blue", "green"),
+           plty = 1, plwd = 2,
+           title = "Emotion Profiles by Category")
+```
+### 📊 Interpreting the Radar Chart: Emotional Profiles by Category
+
+This radar plot compares two contrasting venue categories across five emotional axes. 
+
+- The **blue line** represents venues high on **pleasure**, **curiosity**, and **satisfaction** — suggesting rich, multi-sensory experiences and thoughtful presentation. These align well with **Boozeless’s refined, design-conscious identity**.
+- The **red line** leans more toward **anticipation** and **excitement**, suggesting fast-paced or entertainment-driven environments.
+
+📌 **Takeaway:** Use this radar framework to map venues not just by popularity, but by the **type of emotional journey** they create. Boozeless can prioritize venues that evoke **pleasure, satisfaction, and curiosity** to reinforce its experiential brand values.
+
+
+We create a custom scoring function using weighted emotional axes to identify venues that align well with Boozeless’s brand — prioritizing pleasure, satisfaction, excitement, and anticipation.
+
+
+```{r}
+filtered_data_enriched <- filtered_data_enriched %>%
+  mutate(
+    boozeless_fit_score = 
+      0.4 * pleasure_disgust +
+      0.3 * satisfaction_disappointment +
+      0.2 * excitement_frustration +
+      0.1 * anticipation_dread -
+      0.3 * curiosity_avoidance
+  )
+```
+
+We rank venues based on our custom score and select the top 20 that are the most aligned with Boozeless’s emotional and brand identity.
+```{r}
+top_boozeless_venues <- filtered_data_enriched %>%
+  arrange(desc(boozeless_fit_score)) %>%
+  slice_head(n = 20) %>%
+  select(venue_name, platform_category, boozeless_fit_score)
+
+head(top_boozeless_venues, 5) 
+```
+ Top Contenders:
+The top-ranked venues — including Fin Music Bar and Panamericana — combine premium ambiance with emotionally expressive reviews. Their themes of elevated dining, intimacy, and sensory delight make them natural ambassadors for Boozeless’s alcohol-free, elevated lifestyle positioning.
+
+We create a multi-line chart to visualize average scores of emotional axes for each venue category.
+```{r}
+filtered_data_enriched %>%
+  filter(platform_category %in% c("Cocktail bar", "Fine dining restaurant", "Wine bar")) %>%
+  select(platform_category, pleasure_disgust:anticipation_dread) %>%
+  pivot_longer(-platform_category, names_to = "emotion_axis", values_to = "score") %>%
+  group_by(platform_category, emotion_axis) %>%
+  summarise(score = mean(score, na.rm = TRUE)) %>%
+  ggplot(aes(x = emotion_axis, y = score, color = platform_category, group = platform_category)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  labs(title = "Emotional Profiles: Cocktail Bars vs Fine Dining vs Wine Bars",
+       x = "Emotion Axis", y = "Average Score") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+### 🎭 Insight: Emotional Signatures by Venue Type
+
+This chart compares the average emotional expression across five key axes for Boozeless's main fitting priority categories.
+
+- **Wine bars** emerge as emotional leaders, scoring highest on **pleasure**, **satisfaction**, and **anticipation**. This makes them ideal venues to position Boozeless as a premium, sensory alternative to wine.
+- **Fine dining restaurants** show strength in **satisfaction** and **anticipation**, suggesting customers in these settings are receptive to **refined, slow experiences** — perfect for Boozeless pairings or tasting menus.
+- **Cocktail bars** lead slightly on **curiosity** and **excitement**, making them strong fits for **experimental flavors** or storytelling-led launches.
+
+The typical customer at Panamericana, for example, is a design-savvy urbanite seeking sunset views and shared plates — ideal for Boozeless’s wellness-forward storytelling and pairing menus.
+
+> 📌 **Recommendation:** Tailor activation strategies by venue type — use **playfulness and novelty** in cocktail bars, **ritual and refinement** in fine dining, and **sensory indulgence** in wine bars.
+
+
+We plot the top 20 emotion-aligned venues using Leaflet.
+```{r}
+top_boozeless_venues_geo <- top_boozeless_venues %>%
+  left_join(filtered_data %>% select(venue_name, latitude, longitude), by = "venue_name")
+
+leaflet(data = top_boozeless_venues_geo) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    ~longitude, ~latitude,
+    radius = 6,
+    color = "blue",
+    stroke = TRUE,
+    fillOpacity = 0.8,
+    popup = ~paste0(
+      "<b>", venue_name, "</b><br>",
+      "Category: ", platform_category, "<br>",
+      "Fit Score: ", round(boozeless_fit_score, 2)
+    ),
+    label = ~venue_name
+  ) %>%
+  setView(lng = 103.85, lat = 1.30, zoom = 12)
+```
+
+The map reveals that top emotion-fit venues are highly concentrated in Central Singapore, particularly in areas like Tanjong Pagar, Orchard, and Marina Bay. These neighborhoods are known for premium nightlife, boutique hotels, and high-end dining, suggesting that Boozeless’s ideal customers — affluent, experience-seeking urbanites — are already concentrated in these districts.
+
+📌 Strategic Implication: Focus launch efforts in central districts to maximize brand visibility among tastemakers and trendsetters who influence broader market adoption.
+
+We compare the top 20 venues selected by general popularity scoring and emotion-based scoring, and compute the overlap.
+
+```{r}
+common_venues <- intersect(top_venues$venue_name, top_boozeless_venues$venue_name)
+length(common_venues)  # Count of overlapping venues
+common_venues
+```
+
+We enrich both top-20 lists with category, price, and rating metadata for side-by-side analysis.
+```{r}
+# Enrich top_venues
+top_venues_enriched <- top_venues %>%
+  left_join(filtered_data %>% 
+              select(venue_name, average_rating, review_count, price_point_bucket, platform_category, venue_subsegment), 
+            by = "venue_name")
+
+# Enrich top_boozeless_venues
+top_boozeless_enriched <- top_boozeless_venues %>%
+  left_join(filtered_data %>% 
+              select(venue_name, average_rating, review_count, price_point_bucket, platform_category, venue_subsegment), 
+            by = "venue_name")
+```
+
+We compute average rating and review counts for each strategy to compare the profiles of selected venues.
+```{r}
+top_venues_enriched %>%
+  summarise(
+    avg_rating = mean(average_rating.x, na.rm = TRUE),
+    avg_reviews = mean(review_count.x, na.rm = TRUE),
+  )
+```
+
+```{r}
+top_boozeless_enriched %>%
+  summarise(
+    avg_rating = mean(average_rating, na.rm = TRUE),
+    avg_reviews = mean(review_count, na.rm = TRUE),
+  )
+```
+Interestingly, while general-fit venues average fewer reviews (~807), emotion-fit venues receive significantly more (~1108), despite similar or better ratings. This gap underscores that emotionally resonant venues also enjoy higher engagement — a key predictor of word-of-mouth potential and brand alignment.
+
+```{r}
+top_venues %>% head(10) %>% kable()
+```
+Among the 10 emergent clusters, "Luxury Fine Dining" and "Trendy Cocktail Spots" combine high ratings with distinctive sentiment scores. These segments likely cater to aesthetic, experiential consumers — ideal candidates for Boozeless’s upscale non-alcoholic offerings. "Low-Buzz Bars" and "Neutral Bars", on the other hand, may reflect commoditized experiences with limited emotional payoff — worth deprioritizing in early outreach.
+
+```{r}
+top_boozeless_venues %>% head(10) %>% kable()
+```
+
+
+
+## 🔧 Methodology Recap
+
+Our methodology followed five key steps:
+
+- **Filtering & Cleansing**: Over 700 venues were narrowed down based on minimum review volume (≥100), high ratings (≥4.5), and relevance to premium categories.
+- **TF-IDF Keyword Extraction**: Identified unique language per venue type — e.g., *"wagyu"*, *"scallop"* in Fine Dining, *"whisky"*, *"coffee"* in Bars.
+- **Sentiment Scoring**: Used the Bing lexicon to compute net positivity of review language. Top venues included *Cloudstreet*, *Nixta*, and *Chapter 1 Wine Bar*.
+- **PAM Clustering + PCA**: Uncovered 10 emergent market segments (e.g., *"Trendy Cocktail Spots"*, *"Luxury Fine Dining"*, *"Boutique Japanese"*) to guide targeting.
+- **Emotion-Based Scoring**: Introduced a weighted model using five custom emotional axes. Venues like *Fin Music Bar*, *Panamericana*, and *Bedrock Origin* emerged as standout options.
+
+---
+
+## 🔍 Key Results
+
+- Only **5 venues overlapped** between the general-fit and emotion-fit strategies, underscoring the power of emotion-based targeting.
+- **Emotion-fit venues** showed **higher review counts** (1108 vs 807) and **slightly better ratings** (4.55 vs 4.51) — validating that emotional resonance aligns with popularity.
+- **Bars scored highest on "excitement"**, while **Fine Dining led in "satisfaction" and "anticipation"** — informing Boozeless’s brand storytelling strategy.
+
+---
+
+## 💡 Proposal to Boozeless
+
+To maximize product-market fit and messaging precision, we recommend a **two-pronged outreach strategy**:
+
+- **10 venues from the emotion-fit model** → target with **storytelling-driven partnerships** and **experience-based activations**.
+- **10 venues from the general-fit model** → explore **influencer-led trials**, **standard sampling**, or **co-branded promotions**.
+
+Use emotional axis insights to craft venue-specific pitches:
+- For **wine bars**, emphasize "anticipation", "refined curiosity".
+- For **cocktail bars**, highlight "novelty", "excitement".
+
+### 🧪 Next Steps
+- **A/B test partnership impact** using engagement, brand uplift, and in-venue sales metrics.
+- **Use radar charts and PCA projections** in internal reports and investor materials.
+- **Continuously refine the emotion lexicon and fit model** as Boozeless enters new markets.
+
+---
+
+## ✅ Conclusion
+
+This project demonstrates how **data science infused with emotional intelligence** can power precise, human-centered growth strategies for lifestyle brands.
+
+From linguistic analysis to geospatial mapping, Boozeless now has a blueprint for identifying emotionally resonant launch venues across Singapore’s upscale F&B scene.
+
+## 🛠 Limitations & Next Steps
+
+- **Review Bias**: Text analysis only captures public reviewers, which may skew towards outliers.
+- **Emotion Lexicon Coverage**: While custom-built, the lexicon may miss domain-specific synonyms (e.g., “boozy-free”).
+- **No Temporal Layer**: Analysis does not currently factor in seasonality or venue recency.
+
+➡️ *Future versions* could integrate social media scraping, foot traffic data, or even audio-based ambiance matching to strengthen Boozeless’s go-to-market roadmap.
+
+
