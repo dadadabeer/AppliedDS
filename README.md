@@ -74,15 +74,10 @@ The analysis produces:
 - **Amenity Insights**: Analysis of venue characteristics and opportunities
 - **Strategic Recommendations**: Data-driven partnership targeting
 
-## 👨‍💻 Author
-
-**Mohammad Dabeer Ahmed (A0242380M)**  
-Applied Data Science Project  
-National University of Singapore
 
 ## 🔗 Repository
 
-This project is part of the Applied Data Science course, demonstrating advanced analytics techniques for real-world business strategy development.
+This project is originally extended from Synthesis' Take Home Challenge to my Applied Data Science course, demonstrating advanced analytics techniques for real-world business strategy development.
 
 ---
 
